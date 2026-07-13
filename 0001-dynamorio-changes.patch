@@ -1,0 +1,569 @@
+From d9e27bd60be8a2b00e75661776a01245d023e51b Mon Sep 17 00:00:00 2001
+From: Anonymous Author <anonymous@example.com>
+Date: Wed, 28 Jan 2026 14:55:54 +0100
+Subject: [PATCH] Dynamorio Changes
+
+---
+ CMakeLists.txt                               |   2 +
+ clients/drcachesim/tools/invariant_checker.h |   1 +
+ core/ir/aarch64/codec.c                      |  70 ++++-
+ core/ir/aarch64/codec_v82.txt                |  18 ++
+ core/ir/aarch64/instr_create_api.h           | 264 ++++++++++++++++++-
+ core/ir/aarch64/opnd_defs.txt                |   5 +
+ core/unix/signal.c                           |   2 +-
+ suite/tests/api/dis-a64.txt                  |   3 +
+ suite/tests/api/ir_aarch64_v82.c             |  20 ++
+ 9 files changed, 381 insertions(+), 4 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 45195167e..a86344809 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -805,6 +805,8 @@ if (UNIX)
+   elseif (ARM)
+     # i#1551: add necessary flags for ARM build.
+     if (X64)
++      set(CMAKE_C_FLAGS "-target arm64v8.5+memtag-linux-gnu ${CMAKE_C_FLAGS}")
++      set(CMAKE_CXX_FLAGS "-target arm64v8.5+memtag-linux-gnu ${CMAKE_CXX_FLAGS}")
+     else (X64)
+       # On newer gcc versions such as 11.2 we need an explicit +fp to denote our
+       # gnueablihf hardware-fp-capabilities target.
+diff --git a/clients/drcachesim/tools/invariant_checker.h b/clients/drcachesim/tools/invariant_checker.h
+index f1462953a..6610d2841 100644
+--- a/clients/drcachesim/tools/invariant_checker.h
++++ b/clients/drcachesim/tools/invariant_checker.h
+@@ -41,6 +41,7 @@
+ #include <mutex>
+ #include <stack>
+ #include <unordered_map>
++#include <memory>
+ 
+ class invariant_checker_t : public analysis_tool_t {
+ public:
+diff --git a/core/ir/aarch64/codec.c b/core/ir/aarch64/codec.c
+index b3d813c92..16ddfee7e 100644
+--- a/core/ir/aarch64/codec.c
++++ b/core/ir/aarch64/codec.c
+@@ -1486,6 +1486,20 @@ encode_opnd_x0(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
+     return encode_opnd_wxn(true, false, 0, opnd, enc_out);
+ }
+ 
++/* x0: X register or XSP at bit position 0 */
++
++static inline bool
++decode_opnd_x0sp(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
++{
++    return decode_opnd_wxn(true, true, 0, enc, opnd);
++}
++
++static inline bool
++encode_opnd_x0sp(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
++{
++    return encode_opnd_wxn(true, true, 0, opnd, enc_out);
++}
++
+ /* memx0: memory operand with no offset used as memref for SYS */
+ 
+ static inline bool
+@@ -2013,6 +2027,18 @@ encode_opnd_p10_low(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_o
+     return encode_opnd_p(10, 7, opnd, enc_out);
+ }
+ 
++static inline bool
++decode_opnd_uimm4(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
++{
++    return decode_opnd_int(10, 4, false, 0, OPSZ_4b, 0, enc, opnd);
++}
++
++static inline bool
++encode_opnd_uimm4(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
++{
++    return encode_opnd_int(10, 4, false, 0, 0, opnd, enc_out);
++}
++
+ /* cmode_s_sz: Operand for 32 bit elements' shift amount */
+ 
+ static inline bool
+@@ -2726,8 +2752,8 @@ encode_opnd_wx5_imm5(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_
+ {
+     if (!opnd_is_reg(opnd))
+         ASSERT(false);
+-    uint num;
+-    bool is_x;
++    uint num = 0;
++    bool is_x = false;
+     if (!encode_reg(&num, &is_x, opnd_get_reg(opnd), false))
+         ASSERT(false);
+     *enc_out = num << 5;
+@@ -3018,6 +3044,20 @@ encode_opnd_mem9off(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_o
+     return encode_opnd_int(12, 9, true, 0, 0, opnd, enc_out);
+ }
+ 
++/* imm9: 9-bit immediate operand MTE */
++
++static inline bool
++decode_opnd_imm9(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
++{
++    return decode_opnd_int(12, 9, false, 0, OPSZ_9b, 0, enc, opnd);
++}
++
++static inline bool
++encode_opnd_imm9(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
++{
++    return encode_opnd_int(12, 9, false, 0, 0, opnd, enc_out);
++}
++
+ /* mem9q: memory operand with 9-bit offset; size is 16 bytes */
+ 
+ static inline bool
+@@ -3279,6 +3319,32 @@ encode_opnd_vindex_H(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_
+     return true;
+ }
+ 
++static inline bool
++decode_opnd_uimm6(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
++{
++    return decode_opnd_int(16, 6, false, 0, OPSZ_6b, 0, enc, opnd);
++}
++
++static inline bool
++encode_opnd_uimm6(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
++{
++    return encode_opnd_int(16, 6, false, 0, 0, opnd, enc_out);
++}
++
++/* simm7: 7-bit immediate operand MTE */
++
++static inline bool
++decode_opnd_simm7(uint enc, int opcode, byte *pc, OUT opnd_t *opnd)
++{
++    return decode_opnd_int(15, 7, true, 0, OPSZ_7b, 0, enc, opnd);
++}
++
++static inline bool
++encode_opnd_simm7(uint enc, int opcode, byte *pc, opnd_t opnd, OUT uint *enc_out)
++{
++    return encode_opnd_int(15, 7, true, 0, 0, opnd, enc_out);
++}
++
+ /* imm12: 12-bit immediate operand of ADD/SUB */
+ 
+ static inline bool
+diff --git a/core/ir/aarch64/codec_v82.txt b/core/ir/aarch64/codec_v82.txt
+index 8c5cc79dc..7fbb79155 100644
+--- a/core/ir/aarch64/codec_v82.txt
++++ b/core/ir/aarch64/codec_v82.txt
+@@ -34,6 +34,7 @@
+ 
+ # Instruction definitions:
+ 
++1001000110xxxxxx00xxxxxxxxxxxxxx  n   801  SHA3      addg   x0 : x5 uimm6 uimm4
+ 11001110001xxxxx0xxxxxxxxxxxxxxx  n   599  SHA3      bcax   q0 : q5 q16 q10 b_const_sz
+ 11001110000xxxxx0xxxxxxxxxxxxxxx  n   600  SHA3      eor3   q0 : q5 q16 q10 b_const_sz
+ 11010101000000110010001000011111  n   601  BASE       esb      :
+@@ -150,6 +151,9 @@ x001111011100001000000xxxxxxxxxx  n   120  FP16    fcvtnu  wx0 : h5
+ 0110111011111001111110xxxxxxxxxx  n   167  FP16     fsqrt   q0 : q5 h_sz
+ 0001111011100001110000xxxxxxxxxx  n   167  FP16     fsqrt   h0 : h5
+ 0x001110110xxxxx000101xxxxxxxxxx  n   168  FP16      fsub  dq0 : dq5 dq16 h_sz
++10011010110xxxxx000100xxxxxxxxxx  n   800  BASE       irg x0sp : x5sp x16
++11011001011xxxxxxxxx00xxxxxxxxxx  n   812  SHA3       ldg x0sp : x5sp imm9 # signed offset
++1101100111100000000000xxxxxxxxxx  n   813  SHA3      ldgm   x0 : x5sp
+ 11010101000000110010001000111111  n   602  BASE       psb      :
+ 11001110011xxxxx100011xxxxxxxxxx  n   603  SHA3      rax1   q0 : q5 q16 d_const_sz
+ 0000111001111001110110xxxxxxxxxx  n   362  FP16     scvtf   d0 : d5 h_sz
+@@ -173,6 +177,20 @@ x001111011100001000000xxxxxxxxxx  n   120  FP16    fcvtnu  wx0 : h5
+ 11001110010xxxxx10xx11xxxxxxxxxx  n   592  SM3    sm3tt2b   q0 : q5 q16 imm2idx s_const_sz
+ 1100111011000000100001xxxxxxxxxx  n   593  SM4       sm4e   q0 : q5 s_const_sz
+ 11001110011xxxxx110010xxxxxxxxxx  n   594  SM4    sm4ekey   q0 : q5 q16 s_const_sz
++11011001101xxxxxxxxx01xxxxxxxxxx  n   810  SHA3      st2g x0sp : x5sp imm9 # post index
++11011001101xxxxxxxxx11xxxxxxxxxx  n   810  SHA3      st2g x0sp : x5sp imm9 # pre index
++11011001101xxxxxxxxx10xxxxxxxxxx  n   810  SHA3      st2g x0sp : x5sp imm9 # signed offset
++11011001001xxxxxxxxx01xxxxxxxxxx  n   803  SHA3       stg x0sp : x5sp imm9 # post index
++1101100110100000000000xxxxxxxxxx  n   806  SHA3      stgm x0sp : x5sp
++0110100010xxxxxxxxxxxxxxxxxxxxxx  n   807  SHA3      stgp x0sp : x5sp x10 simm7 # post index
++0110100110xxxxxxxxxxxxxxxxxxxxxx  n   807  SHA3      stgp x0sp : x5sp x10 simm7 # pre index
++0110100100xxxxxxxxxxxxxxxxxxxxxx  n   807  SHA3      stgp x0sp : x5sp x10 simm7 # signed offest
++11011001111xxxxxxxxx01xxxxxxxxxx  n   811  SHA3     stz2g x0sp : x5sp imm9 # post index
++11011001111xxxxxxxxx11xxxxxxxxxx  n   811  SHA3     stz2g x0sp : x5sp imm9 # post pre index
++11011001111xxxxxxxxx10xxxxxxxxxx  n   811  SHA3     stz2g x0sp : x5sp imm9 # signed offset
++1101100100100000000000xxxxxxxxxx  n   809  SHA3      stzg x0sp : x5sp
++1101100100100000000000xxxxxxxxxx  n   808  SHA3     stzgm x0sp : x5sp
++1101000110xxxxxx00xxxxxxxxxxxxxx  n   802  SHA3      subg   x0 : x5 uimm6 uimm4
+ 0010111001111001110110xxxxxxxxxx  n   510  FP16     ucvtf   d0 : d5 h_sz
+ 0110111001111001110110xxxxxxxxxx  n   510  FP16     ucvtf   q0 : q5 h_sz
+ 0001111011100011000000xxxxxxxxxx  n   510  FP16     ucvtf   h0 : w5
+diff --git a/core/ir/aarch64/instr_create_api.h b/core/ir/aarch64/instr_create_api.h
+index f0a808033..0a31fd11f 100644
+--- a/core/ir/aarch64/instr_create_api.h
++++ b/core/ir/aarch64/instr_create_api.h
+@@ -3970,4 +3970,266 @@
+  */
+ #define INSTR_CREATE_psb_csync(dc) instr_create_0dst_0src(dc, OP_psb)
+ 
+-#endif /* DR_IR_MACROS_AARCH64_H */
++/**
++ * Creates a ADDG instruction.
++ * Add immediate value to Logical Address Tag
++ *
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    ADDG <Xd|SP>, <Xn|SP>, #<uimm6>, #<uimm4>
++ * \endverbatim
++ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt   The first destination register, X (Extended, 64 bits)
++ * \param Rn   The first source register, X (Extended, 64 bits)
++ * \param uimm6   Immediate Index
++ * \param uimm4   Immediate Index (Excluded Tag Mask)
++ */
++#define INSTR_CREATE_addg(dc, Rt, Rn, uimm6, uimm4) instr_create_1dst_3src(dc, OP_addg, Rt, Rn, uimm6, uimm4)
++
++/**
++ * Creates a SUBG instruction.
++ * Subtract with tag
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    SUBG <Xd|SP>, <Xn|SP>, #<uimm6>, #<uimm4>
++ * \endverbatim
++ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt   The first destination register, X (Extended, 64 bits)
++ * \param Rn   The first source register, X (Extended, 64 bits)
++ * \param uimm6   Immediate Index
++ * \param uimm4   Immediate Index (Excluded Tag Mask)
++ */
++#define INSTR_CREATE_subg(dc, Rt, Rn, uimm6, uimm4) instr_create_1dst_3src(dc, OP_subg, Rt, Rn, uimm6, uimm4)
++
++
++/**
++ * Creates a IRG instruction.
++ * Random Logical Address Tag generation with exclusion
++ * 
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    IRG <Xd|SP>, <Xn|SP>, <Xm>
++ * \endverbatim
++ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ * \param Rm The second source register
++ */
++#define INSTR_CREATE_irg(dc, Rt, Rn, Rm) instr_create_1dst_2src(dc, OP_irg, Rt, Rn, Rm)
++
++/**
++ * Creates a IRG instruction with XZR.
++ * Random Logical Address Tag generation
++ * 
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    IRG <Xd|SP>, <Xn|SP>
++ * \endverbatim
++ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
++ */
++// #define INSTR_CREATE_wtf(dc) instr_create_0dst_0src(dc, OP_wtf)
++
++/**
++ * Creates a STGM instruction.
++ * Store a number of Allocation Tags defined in GMID_EL1, Multiple tag transfer ID register
++ * 
++ *
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    STGM <Xd|SP>, <Xn|SP>
++ * \endverbatim
++ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ */
++#define INSTR_CREATE_stgm(dc, Rt, Rn) instr_create_1dst_1rc(dc, OP_stgm, Rt, Rn)
++
++/**
++ * Creates a STGZM instruction.
++ * Store Tag and Zero Multiple writes a naturally aligned block of N Allocation Tags and stores zero to the associated
++data locations, where the size of N is identified in DCZID_EL0.BS.
++ * 
++ *
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    STGZM <Xd|SP>, <Xn|SP>
++ * \endverbatim
++ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ */
++#define INSTR_CREATE_stzgm(dc, Rt, Rn) instr_create_1dst_1rc(dc, OP_stzgm, Rt, Rn)
++
++/**
++ * Creates a LDGM instruction.
++ * Load a number of Allocation Tags defined in GMID_EL1, Multiple tag transfer ID register
++ * 
++ *
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    LDGM <Xd|SP>, <Xn|SP>
++ * \endverbatim
++ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ */
++#define INSTR_CREATE_ldgm(dc, Rt, Rn) instr_create_1dst_1rc(dc, OP_ldgm, Rt, Rn)
++
++/**
++ * Creates a GMI instruction.
++ * Inserts the tag in the first source register into the excluded set specified in the second source register,
++writing the new excluded set to the destination register.
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    GMI <Xd|SP>, <Xn|SP>, <Xm>
++ * \endverbatim
++ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ * \param Rm The second source register
++ */
++#define INSTR_CREATE_gmi(dc, Rt, Rn, Rm) instr_create_1dst_2src(dc, OP_gmi, Rt, Rn, Rm)
++
++/**
++ * Creates a SUBP instruction.
++ * Subtract Pointer
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    SUBP <Xd>, <Xn|SP>, <Xm|SP>
++ * \endverbatim
++ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ * \param Rm The second source register
++ */
++#define INSTR_CREATE_subp(dc, Rt, Rn, Rm) instr_create_1dst_2src(dc, OP_subp, Rt, Rn, Rm)
++
++/**
++ * Creates a SUBPS instruction.
++ * Subtract Pointer with sign extend
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    SUBP <Xd>, <Xn|SP>, <Xm|SP>
++ * \endverbatim
++ * \param dc   The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ * \param Rm The second source register
++ */
++#define INSTR_CREATE_subps(dc, Rt, Rn, Rm) instr_create_1dst_2src(dc, OP_subps, Rt, Rn, Rm)
++
++/**
++ * Creates a LDG instruction.
++ * Load an Allocation Tag and merge it into destination register
++ * 
++ *
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    LDG <Xd|SP>, [<Xn|SP>{, #<simm}]
++ * \endverbatim
++ * \param dc    The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ * \param imm9 The second source register
++ */
++#define INSTR_CREATE_ldg(dc, Rt, Rn, imm9) instr_create_1dst_2src(dc, OP_ldg, Rt, Rn, imm9)
++
++/**
++ * Creates a STG instruction.
++ * Store an Allocation Tag
++ * 
++ *
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    STG <Xd|SP>, [<Xn|SP>{, #<simm}]
++ * \endverbatim
++ * \param dc    The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ * \param imm9 The second source register
++ */
++#define INSTR_CREATE_stg(dc, Rt, Rn, imm9) instr_create_1dst_2src(dc, OP_stg, Rt, Rn, imm9)
++
++/**
++ * Creates a STG instruction.
++ * Store an Allocation Tag
++ * 
++ *
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    STG <Xd|SP>, [<Xn|SP>{, #<simm}]
++ * \endverbatim
++ * \param dc    The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ * \param imm9 The second source register
++ */
++#define INSTR_CREATE_stg_simple(dc, Rt, Rn, imm9) instr_create_1dst_2src(dc, OP_stg, Rt, Rn, imm9)
++
++/**
++ * Creates a STZG instruction.
++ * Store an Allocation Tag zeroing the associated data location
++ * 
++ *
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    STZG <Xd|SP>, [<Xn|SP>], #<simm
++ * \endverbatim
++ * \param dc    The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ * \param imm9 The second source register
++ */
++#define INSTR_CREATE_stzg(dc, Rt, Rn, imm9) instr_create_1dst_2src(dc, OP_stzg, Rt, Rn, imm9)
++
++
++/**
++ * Creates a ST2G instruction.
++ * Store an Allocation Tag to two Tag granules
++ * 
++ *
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    ST2G <Xd|SP>, [<Xn|SP>{, #<simm}]
++ * \endverbatim
++ * \param dc    The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ * \param imm9 The second source register
++ */
++#define INSTR_CREATE_st2g(dc, Rt, Rn, imm9) instr_create_1dst_2src(dc, OP_st2g, Rt, Rn, imm9)
++
++/**
++ * Creates a STZ2G instruction.
++ * Store an Allocation Tag zeroing the associated data location
++ * 
++ *
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    STZ2G <Xd|SP>, [<Xn|SP>], #<simm
++ * \endverbatim
++ * \param dc    The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ * \param imm9 The second source register
++ */
++#define INSTR_CREATE_stz2g(dc, Rt, Rn, imm9) instr_create_1dst_2src(dc, OP_stz2g, Rt, Rn, imm9)
++
++/**
++ * Creates a STGP instruction.
++ * Store an Allocation Tag and pair of registers
++ * 
++ *
++ * This macro is used to encode the forms:
++ * \verbatim
++ *    STGP <Xt1>, <Xt2>, [<Xn|SP>], #<imm>
++ * \endverbatim
++ * \param dc    The void * dcontext used to allocate memory for the #instr_t.
++ * \param Rt The first destination register
++ * \param Rn The first source register
++ * \param Rm The second source register
++ * \param simm7 The third source register
++ */
++#define INSTR_CREATE_stgp(dc, Rt, Rn, Rm, simm7) instr_create_1dst_3src(dc, OP_stgp, Rt, Rn, Rm, simm7)
++
++#endif /* DR_IR_MACROS_AARCH64_H */
+\ No newline at end of file
+diff --git a/core/ir/aarch64/opnd_defs.txt b/core/ir/aarch64/opnd_defs.txt
+index 0688a7b86..5090c4c8c 100644
+--- a/core/ir/aarch64/opnd_defs.txt
++++ b/core/ir/aarch64/opnd_defs.txt
+@@ -78,6 +78,7 @@
+ ---------------------------xxxxx  w0p0       # even-numbered W register (or WZR)
+ ---------------------------xxxxx  w0p1       # ... add 1
+ ---------------------------xxxxx  x0         # X register (or XZR)
++---------------------------xxxxx  x0sp       # X register or XSP
+ ---------------------------xxxxx  memx0      # X register used as memref for SYS
+ ---------------------------xxxxx  x0p0       # even-numbered X register (or XZR)
+ ---------------------------xxxxx  x0p1       # ... add 1
+@@ -110,6 +111,7 @@
+ ------------------x-------------  cmode_h_sz # Vector shift for 16 bit elements
+ ------------------xx------------  imm2idx    # imm from 13-12, used as an index
+ ------------------xxxx----------  p10_low    # SVE predicate registers p0-p7
++------------------xxxx----------  uimm4      # Option for mte
+ -----------------xx-------------  cmode_s_sz # Vector shift for 32 bit elements
+ -----------------xx-------------  len        # imm2 len
+ -----------------xxxx-----------  imm4idx    # imm4 from 11-14
+@@ -152,6 +154,7 @@
+ -----------xxxxx----------------  h16        # H register
+ -----------xxxxx----------------  s16        # S register
+ -----------xxxxxxxxx------------  mem9off    # immed offset for mem9/mem9post
++-----------xxxxxxxxx------------  imm9       # Option for mte
+ -----------xxxxxxxxx--xxxxx-----  mem9q      # size is 16 bytes
+ -----------xxxxxxxxx--xxxxx-----  prf9       # size is 0 bytes (prefetch variant of mem9)
+ -----------xxxxxxxxx--xxxxx-----  memregq    # register offset, size is 16 bytes
+@@ -162,6 +165,8 @@
+ ----------?xxxxx--?-??----------  x16immvr   # computes immed from 21, 13 and 11:10
+ ----------?xxxxx???-??----------  x16immvs   # computes immed from 21, 15:13 and 11:10
+ ----------xx--------x-----------  vindex_H   # Index for vector with half elements (0-7)
++----------xxxxxx----------------  uimm6      # Option for mte
++----------xxxxxxx---------------  simm7      # Option for mte
+ ----------xxxxxxxxxxxx----------  imm12      # immediate for ADD/SUB
+ ----------xxxxxxxxxxxxxxxxx-----  mem12q     # size is 16 bytes
+ ----------xxxxxxxxxxxxxxxxx-----  prf12      # size is 0 bytes (prefetch variant of mem12)
+diff --git a/core/unix/signal.c b/core/unix/signal.c
+index 2f7e3acea..af44e24ac 100644
+--- a/core/unix/signal.c
++++ b/core/unix/signal.c
+@@ -4139,7 +4139,7 @@ abort_on_fault(dcontext_t *dcontext, uint dumpcore_flag, app_pc pc, byte *target
+ #if defined(STATIC_LIBRARY) && defined(LINUX)
+     thread_sig_info_t *info = (thread_sig_info_t *)dcontext->signal_field;
+     uint orig_dumpcore_flag = dumpcore_flag;
+-    if (init_info.sighand->action != NULL)
++    if ((kernel_sigaction_t *)init_info.sighand->action != (kernel_sigaction_t *)NULL)
+         info = &init_info; /* use init-time handler */
+     ASSERT(info->sighand->action != NULL);
+ #endif
+diff --git a/suite/tests/api/dis-a64.txt b/suite/tests/api/dis-a64.txt
+index f05135241..cd87f820c 100644
+--- a/suite/tests/api/dis-a64.txt
++++ b/suite/tests/api/dis-a64.txt
+@@ -53076,3 +53076,6 @@ ce99bf17 : xar v23.2d, v24.2d, v25.2d, #0x2f         : xar    %q24 %q25 $0x2f $0
+ ce9bcf59 : xar v25.2d, v26.2d, v27.2d, #0x33         : xar    %q26 %q27 $0x33 $0x03 -> %q25
+ ce9ddf9b : xar v27.2d, v28.2d, v29.2d, #0x37         : xar    %q28 %q29 $0x37 $0x03 -> %q27
+ ce81fc1f : xar v31.2d, v0.2d, v1.2d, #0x3f           : xar    %q0 %q1 $0x3f $0x03 -> %q31
++
++# ADG
++9ac91108 : irg x8, x8, x9                            : irg    %x8 %x9 -> %x8
+diff --git a/suite/tests/api/ir_aarch64_v82.c b/suite/tests/api/ir_aarch64_v82.c
+index 745a8b899..d577fa074 100644
+--- a/suite/tests/api/ir_aarch64_v82.c
++++ b/suite/tests/api/ir_aarch64_v82.c
+@@ -2212,6 +2212,24 @@ TEST_INSTR(xar)
+     return success;
+ }
+ 
++// TEST_INSTR(irg)
++// {
++//     print("Testing irg\n");
++//     bool success = true;
++//     instr_t *instr;
++//     byte *pc;
++//     const char *expected_0_0 = {
++//         "xar    %x0 %x1 %x2 -> %x5"
++//     };
++//     /* ADC <Xd>, <Xn>, <Xm> */
++//     instr = INSTR_CREATE_irg(dc, opnd_create_reg(DR_REG_X0), opnd_create_reg(DR_REG_X1),
++//                              opnd_create_reg(DR_REG_X2));
++//     if (!test_instr_encoding(dc, OP_adc, instr, expected_0_0))
++//             success = false;
++//     return success;
++// }
++
++
+ int
+ main(int argc, char *argv[])
+ {
+@@ -2293,6 +2311,8 @@ main(int argc, char *argv[])
+     RUN_INSTR_TEST(rax1);
+     RUN_INSTR_TEST(xar);
+ 
++    // RUN_INSTR_TEST(irg);
++
+     print("All v8.2 tests complete.\n");
+ #ifndef STANDALONE_DECODER
+     dr_standalone_exit();
+-- 
+2.25.1
+

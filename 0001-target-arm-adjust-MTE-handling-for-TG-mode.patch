@@ -1,0 +1,120 @@
+From d87dc8d4f6d978ae3b5487030cf510aec3eeeb54 Mon Sep 17 00:00:00 2001
+From: Anonymous Author <anonymous@example.com>
+Date: Wed, 25 Mar 2026 11:12:34 +0100
+Subject: [PATCH] target/arm: adjust MTE handling for TG mode
+
+---
+ target/arm/cpu.h            |  2 +-
+ target/arm/tcg/mte_helper.c | 59 +++++++++----------------------------
+ 2 files changed, 15 insertions(+), 46 deletions(-)
+
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+index 88e5accda6..28feaf1504 100644
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -3319,7 +3319,7 @@ extern const uint64_t pred_esz_masks[5];
+ #define PAGE_TARGET_STICKY  PAGE_MTE
+ 
+ /* We associate one allocation tag per 16 bytes, the minimum.  */
+-#define LOG2_TAG_GRANULE 4
++#define LOG2_TAG_GRANULE 4
+ #define TAG_GRANULE      (1 << LOG2_TAG_GRANULE)
+ 
+ #ifdef CONFIG_USER_ONLY
+diff --git a/target/arm/tcg/mte_helper.c b/target/arm/tcg/mte_helper.c
+index 9c64def081..330a1372c8 100644
+--- a/target/arm/tcg/mte_helper.c
++++ b/target/arm/tcg/mte_helper.c
+@@ -676,11 +676,11 @@ static int mte_probe_int(CPUARMState *env, uint32_t desc, uint64_t ptr,
+                          uintptr_t ra, uint64_t *fault)
+ {
+     int mmu_idx, ptr_tag, bit55;
+-    uint64_t ptr_last, prev_page, next_page;
++    uint64_t ptr_last;
+     uint64_t tag_first, tag_last;
+     uint64_t tag_byte_first, tag_byte_last;
+-    uint32_t sizem1, tag_count, tag_size, n, c;
+-    uint8_t *mem1, *mem2;
++    uint32_t sizem1, tag_count, tag_size, n;
++    uint8_t *mem1;
+     MMUAccessType type;
+ 
+     bit55 = extract64(ptr, 55, 1);
+@@ -692,14 +692,16 @@ static int mte_probe_int(CPUARMState *env, uint32_t desc, uint64_t ptr,
+     }
+ 
+     ptr_tag = allocation_tag_from_addr(ptr);
+-
++    if (!ptr_tag) {
++        return 1;
++    }
+     if (tcma_check(desc, bit55, ptr_tag)) {
+         return 1;
+     }
+ 
+     mmu_idx = FIELD_EX32(desc, MTEDESC, MIDX);
+     type = FIELD_EX32(desc, MTEDESC, WRITE) ? MMU_DATA_STORE : MMU_DATA_LOAD;
+-    sizem1 = FIELD_EX32(desc, MTEDESC, SIZEM1);
++    sizem1 = 0;
+ 
+     /* Find the addr of the end of the access */
+     ptr_last = ptr + sizem1;
+@@ -713,48 +715,15 @@ static int mte_probe_int(CPUARMState *env, uint32_t desc, uint64_t ptr,
+     tag_byte_first = QEMU_ALIGN_DOWN(ptr, 2 * TAG_GRANULE);
+     tag_byte_last = QEMU_ALIGN_DOWN(ptr_last, 2 * TAG_GRANULE);
+ 
+-    /* Locate the page boundaries. */
+-    prev_page = ptr & TARGET_PAGE_MASK;
+-    next_page = prev_page + TARGET_PAGE_SIZE;
+-
+-    if (likely(tag_last - prev_page < TARGET_PAGE_SIZE)) {
+-        /* Memory access stays on one page. */
+-        tag_size = ((tag_byte_last - tag_byte_first) / (2 * TAG_GRANULE)) + 1;
+-        mem1 = allocation_tag_mem(env, mmu_idx, ptr, type, sizem1 + 1,
+-                                  MMU_DATA_LOAD, tag_size, ra);
+-        if (!mem1) {
+-            return 1;
+-        }
+-        /* Perform all of the comparisons. */
+-        n = checkN(mem1, ptr & TAG_GRANULE, ptr_tag, tag_count);
+-    } else {
+-        /* Memory access crosses to next page. */
+-        tag_size = (next_page - tag_byte_first) / (2 * TAG_GRANULE);
+-        mem1 = allocation_tag_mem(env, mmu_idx, ptr, type, next_page - ptr,
+-                                  MMU_DATA_LOAD, tag_size, ra);
+-
+-        tag_size = ((tag_byte_last - next_page) / (2 * TAG_GRANULE)) + 1;
+-        mem2 = allocation_tag_mem(env, mmu_idx, next_page, type,
+-                                  ptr_last - next_page + 1,
+-                                  MMU_DATA_LOAD, tag_size, ra);
+-
+-        /*
+-         * Perform all of the comparisons.
+-         * Note the possible but unlikely case of the operation spanning
+-         * two pages that do not both have tagging enabled.
+-         */
+-        n = c = (next_page - tag_first) / TAG_GRANULE;
+-        if (mem1) {
+-            n = checkN(mem1, ptr & TAG_GRANULE, ptr_tag, c);
+-        }
+-        if (n == c) {
+-            if (!mem2) {
+-                return 1;
+-            }
+-            n += checkN(mem2, 0, ptr_tag, tag_count - c);
+-        }
++    tag_size = ((tag_byte_last - tag_byte_first) / (2 * TAG_GRANULE)) + 1;
++    mem1 = allocation_tag_mem(env, mmu_idx, ptr, type, sizem1 + 1,
++                              MMU_DATA_LOAD, tag_size, ra);
++    if (!mem1) {
++        return 1;
+     }
+ 
++    n = checkN(mem1, ptr & TAG_GRANULE, ptr_tag, tag_count);
++
+     if (likely(n == tag_count)) {
+         return 1;
+     }
+-- 
+2.43.0
+
